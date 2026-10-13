@@ -150,3 +150,9 @@ docker.exe run --rm --name tri-proxy-verify --mount 'type=bind,source=C:/Users/D
 - `work/egress-fixture.cjs`：`e57d9e3cec45b83b59610214075a2dfccaefe9ef44622777d1be6eeab0aae69e`。
 
 本輪腳本、操作文件、流程對照及架構圖已完成本地交付，沒有待決選項或本地驗收阻塞；使用者已授權更新既有公開 GitHub 儲存庫。驗證邊界仍為服務管理替身及 loopback IPv6，未驗證真實 systemd、公網 IPv6、VPS、防火牆、Cloudflare 帳戶或 arm64；UDP 目標的跨地址族回退不在本輪驗收範圍。
+
+### 出口策略 GitHub 發佈
+
+2026-10-14 已將出口策略程式碼提交 [`efe1fad5397f2e5ddc7d5af185f25cb3c93c0a3a`](https://github.com/dxtong/tri-proxy-debian/commit/efe1fad5397f2e5ddc7d5af185f25cb3c93c0a3a) 推送至 `origin main`。已核對遠端與本地提交一致、工作區乾淨，以及公開 main 的全部 12 個檔案均可匿名下載，SHA-256 與本機一致；腳本及三個驗收檔案符合上文已測雜湊。
+
+本輪出口策略已完成實作、完整容器驗收、文件及 GitHub 發佈，沒有剩餘工作或待決選項；實機驗證邊界維持上述限制。
