@@ -1,0 +1,11 @@
+# 伺服器生成的私密設定與客戶端匯出不得提交。
+.env
+.env.*
+*.key
+*.pem
+tunnel.token
+config.json
+metadata.json
+client.json
+clash.yaml
+links.txt
