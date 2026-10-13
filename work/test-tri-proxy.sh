@@ -24,6 +24,7 @@ CLIENT_PID=
 HTTP_PID=
 GATEWAY_PID=
 BUSY_PID=
+EGRESS_HTTP_PID=
 systemctl() {
     printf '%s\n' "$*" >>/tmp/tri-systemctl.log
     case $1 in
@@ -94,8 +95,9 @@ trap - EXIT
 test_cleanup() {
     local result=$?
     trap - EXIT
+    [[ ! -f /tmp/tri-egress-resolv.conf ]] || cp /tmp/tri-egress-resolv.conf /etc/resolv.conf
     [[ ! -f /tmp/tri-service.pid ]] || SERVER_PID=$(cat /tmp/tri-service.pid)
-    for pid in "$CLIENT_PID" "$SERVER_PID" "$HTTP_PID" "$GATEWAY_PID" "$BUSY_PID"; do
+    for pid in "$CLIENT_PID" "$SERVER_PID" "$HTTP_PID" "$GATEWAY_PID" "$BUSY_PID" "$EGRESS_HTTP_PID"; do
         [[ -z $pid ]] || kill "$pid" 2>/dev/null || true
     done
     if (( result != 0 )); then
@@ -107,6 +109,7 @@ test_cleanup() {
         fi
         tail -n 30 /tmp/tri-server.log /tmp/tri-client.log 2>/dev/null || true
         tail -n 30 /tmp/tri-mihomo.log /tmp/tri-update-failure.log 2>/dev/null || true
+        tail -n 30 /tmp/tri-egress-*.log 2>/dev/null || true
     fi
     exit "$result"
 }
@@ -127,6 +130,7 @@ if (SERVER_ADDR=127.0.0.1 main --defaults >/tmp/tri-repeat.log 2>&1); then
     exit 1
 fi
 load_metadata
+[[ $EGRESS_MODE == auto ]]
 [[ $ARGO_MODE == 0 && $REALITY_PORT != 24443 && $HY_PORT != 24443 && $WS_PORT != 24444 && $REALITY_PORT != "$WS_PORT" ]]
 kill "$BUSY_PID"
 wait "$BUSY_PID" || true
@@ -235,6 +239,7 @@ for protocol in reality hysteria2 vmess; do
     [[ $(proxy_request) == proxy-e2e-ok ]]
     printf 'PASS：%s 實際代理連線。\n' "$protocol"
 done
+source /src/work/test-egress.sh
 
 jq '.outbounds[0].default = "hysteria2" | .outbounds[2].password = "incorrect"' \
     /etc/tri-proxy/client.json >/tmp/tri-client.json
@@ -465,15 +470,16 @@ account_owned
 # 在同一容器重裝兩種 Argo；Tunnel 管理用 stub，仍核對實際生成的服務及秘密檔案。
 for mode in 1 2; do
     (
-        unset REALITY_PORT HY_PORT WS_PORT REALITY_SNI ARGO_MODE ARGO_HOST CF_TUNNEL_TOKEN UUID VMESS_UUID HY_PASSWORD
+        unset REALITY_PORT HY_PORT WS_PORT REALITY_SNI ARGO_MODE ARGO_HOST CF_TUNNEL_TOKEN UUID VMESS_UUID HY_PASSWORD EGRESS_MODE
         export SERVER_ADDR=127.0.0.1 vlpt=34443 hypt=34443 vmpt=34444 reym=www.microsoft.com
+        export EGRESS_MODE=prefer_ipv6
         export uuid=11111111-2222-4333-8444-555555555555 argo=vmpt
         if [[ $mode == 2 ]]; then export agn=edge.example.com agk=test-token; fi
         main install
     ) >/tmp/tri-env-install.log 2>&1
     jq -e --arg mode "$mode" '.ARGO_MODE == $mode and .REALITY_PORT == "34443" and .HY_PORT == "34443"
        and .WS_PORT == "34444" and .UUID == "11111111-2222-4333-8444-555555555555"
-       and .VMESS_UUID == .UUID' /etc/tri-proxy/metadata.json >/dev/null
+       and .VMESS_UUID == .UUID and .EGRESS_MODE == "prefer_ipv6"' /etc/tri-proxy/metadata.json >/dev/null
     jq -e '.inbounds[2].listen == "127.0.0.1" and (.inbounds[2] | has("tls") | not)' /etc/tri-proxy/config.json >/dev/null
     systemd-analyze verify /etc/systemd/system/tri-proxy.service /etc/systemd/system/tri-proxy-argo.service
     if [[ $mode == 1 ]]; then
@@ -515,14 +521,29 @@ for mode in 1 2; do
         jq -e '.outbounds[3].server == "edge.example.com"' /etc/tri-proxy/client.json >/dev/null
         [[ $(stat -c %a /etc/tri-proxy/tunnel.token) == 640 ]]
         compat_rep vmpt= >/tmp/tri-rep-no-argo.log 2>&1
-        jq -e '.ARGO_MODE == "0" and .WS_PORT == "34444"' /etc/tri-proxy/metadata.json >/dev/null
+        jq -e '.ARGO_MODE == "0" and .WS_PORT == "34444" and .EGRESS_MODE == "prefer_ipv6"' /etc/tri-proxy/metadata.json >/dev/null
         [[ ! -f /etc/systemd/system/tri-proxy-argo.service && ! -e /etc/tri-proxy/tunnel.token && ! -e /opt/tri-proxy/cloudflared ]]
         jq -e '.inbounds[2].listen == "0.0.0.0" and .inbounds[2].tls.enabled' /etc/tri-proxy/config.json >/dev/null
-        compat_rep REALITY_PORT=35443 vlpt=34567 >/tmp/tri-rep-custom-port.log 2>&1
+        compat_rep REALITY_PORT=35443 vlpt=34567 EGRESS_MODE=ipv4_only >/tmp/tri-rep-custom-port.log 2>&1
         jq -e '.REALITY_PORT == "35443" and .HY_PORT == "34443" and .WS_PORT == "34444"' /etc/tri-proxy/metadata.json >/dev/null
-        jq -e '.inbounds[0].listen_port == 35443' /etc/tri-proxy/config.json >/dev/null
+        jq -e '.inbounds[0].listen_port == 35443 and .route.rules[0].ip_version == 6' /etc/tri-proxy/config.json >/dev/null
     fi
     main del <<< UNINSTALL >/tmp/tri-uninstall.log
 done
+if (
+    unset EGRESS_MODE
+    EGRESS_MODE=invalid SERVER_ADDR=127.0.0.1 main --defaults
+) >/tmp/tri-egress-env-invalid.log 2>&1; then exit 1; fi
+grep -q 'EGRESS_MODE 無效' /tmp/tri-egress-env-invalid.log
+[[ ! -e /etc/tri-proxy ]]
+(
+    unset REALITY_PORT HY_PORT WS_PORT REALITY_SNI ARGO_MODE ARGO_HOST CF_TUNNEL_TOKEN UUID VMESS_UUID HY_PASSWORD
+    SERVER_ADDR=127.0.0.1 REALITY_PORT=35443 HY_PORT=35443 WS_PORT=35444 EGRESS_MODE=prefer_ipv4 \
+        main --custom <<< $'\n\n\n\n\n\n\n\n3\n'
+) >/tmp/tri-egress-custom-install.log 2>&1
+jq -e '.EGRESS_MODE == "prefer_ipv6"' /etc/tri-proxy/metadata.json >/dev/null
+jq -e '.outbounds[0].domain_resolver.strategy == "prefer_ipv6"' /etc/tri-proxy/config.json >/dev/null
+main del <<< UNINSTALL >/tmp/tri-uninstall.log
+printf 'PASS：出口環境變數安裝／非法值拒絕、自訂安裝數字選擇、rep 沿用及明確覆寫。\n'
 printf 'PASS：循環選單、指令別名、快捷命令、取消／備份解除安裝及帳戶保留重裝；兩種 Argo 的環境變數安裝；rep 的 Argo 回復及臨時→固定→關閉；快捷選單內解除後直接重裝。\n'
 printf '未測試真實 systemd 管理器、Cloudflare Tunnel 帳戶、arm64 或公網防火牆。\n'

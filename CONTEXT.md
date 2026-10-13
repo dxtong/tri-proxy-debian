@@ -12,6 +12,12 @@ _避免_：用「三合一」指稱包含 TUIC 的其他組合。
 **Argo 入口**：客戶端經 Cloudflare Tunnel 連接的 VMess WS 入口。
 _避免_：把它稱為整台 VPS 的 Cloudflare 保護。
 
+**代理出口**：VPS 上的代理核心代表客戶端連往目標網站的連線。
+_避免_：以「代理出口」指稱客戶端連接 VPS 的直連入口或 Argo 入口。
+
+**出口地址族策略**：代理出口選擇 IPv4／IPv6 目標地址的優先順序或使用限制。
+_避免_：把「優先使用」稱為「只允許」，或把出口策略稱為入口 IP 切換。
+
 **臨時 Tunnel**：Cloudflare Quick Tunnel 提供、可能隨行程重啟改變網域的入口。
 
 **固定 Tunnel**：使用自有公開主機名稱及 Tunnel Token 的 Cloudflare Tunnel 入口。

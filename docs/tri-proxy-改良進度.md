@@ -93,3 +93,60 @@ docker.exe run --rm --name tri-proxy-verify --mount 'type=bind,source=C:/Users/D
 發佈核對已通過：遠端 `main` 與本地提交一致、全部 10 個檔案的清單一致；兩個 Shell 腳本均可匿名下載（HTTP `200`），SHA-256 與上述完整驗證版本一致。首次核對的提交為 `fb6829abb173f5cb18b79c92728570d75a956cfd`；本段發佈記錄亦提交及推送至同一分支。
 
 本輪完成 GitHub 發佈及下載核對；未部署 VPS、未重新執行完整容器測試，原有真實 systemd、Cloudflare 帳戶、公網防火牆及 arm64 的驗證邊界維持不變。
+
+## 出口地址族策略需求澄清
+
+2026-10-14 使用者確認 IPv4／IPv6 選擇所指為 VPS → 目標網站的代理出口。現有腳本只根據入口地址生成監聽及匯出配置，伺服器 direct 出站尚未提供出口地址族選項。
+
+已記錄「代理出口」及「出口地址族策略」用語。使用者已選定五種模式，首次安裝預設保留「自動」；需求澄清階段只更新本機文件，後續實作及驗收結果見下文。
+
+### 已確認的實作方案
+
+目標為三種協定共用一個 VPS → 目標網站的出口策略；入口地址、代理身份及端口保持原設定。Cloudflare Tunnel 連線、REALITY 握手、DNS 查詢傳輸及 VPS 其他程式不納入此策略，也不更改系統防火牆或停用系統 IPv6。
+
+| 選單名稱 | 參數值 | 代理目標行為 |
+|---|---|---|
+| 自動 | `auto` | 保留目前 direct 出站的地址族選擇行為 |
+| IPv4 優先 | `prefer_ipv4` | 網域 A／AAAA 同時可用時先試 IPv4；TCP 可回退 IPv6 |
+| IPv6 優先 | `prefer_ipv6` | 網域 A／AAAA 同時可用時先試 IPv6；TCP 可回退 IPv4 |
+| 僅 IPv4 | `ipv4_only` | 網域只取 IPv4，並拒絕 IPv6 IP 字面值的代理目標 |
+| 僅 IPv6 | `ipv6_only` | 網域只取 IPv6，並拒絕 IPv4 IP 字面值的代理目標 |
+
+優先模式不改寫客戶端已傳入的 IP 地址。UDP 不具備 TCP 的雙地址族競速；不可承諾目標無回應時會自動回退。「僅」模式遇到沒有相符地址族或不可達的目標時失敗。
+
+操作方案：自訂安裝加入出口選項，非互動安裝支援 `EGRESS_MODE`；既有安裝透過「其他管理 → 出口策略」或 `agsbx egress <模式>` 切換。新安裝及缺少新 Metadata 欄位的舊版安裝採用 `auto`；重建未指定此選項時沿用原出口策略。
+
+切換流程：取得既有管理鎖 → 驗證模式及候選配置 → 保存私密配置／Metadata 備份及原運行狀態 → 替換設定 → 原本運行的核心重啟 → 檢查結果。原本停止的核心維持停止；啟動失敗回復舊配置及狀態。切換不重建 UUID、密碼、憑證或客戶端匯出，運行中的連線會短暫中斷。
+
+實作使用 sing-box 1.14.3 支援的 local DNS 及 `domain_resolver`，明確指定 `server` 與 `strategy`；僅模式另以路由 `ip_version`／`reject` 處理另一地址族的 IP 字面值。舊 `domain_strategy` 已在 1.14 移除，不採用過時範例。
+
+影響範圍為安裝器、管理命令／選單、狀態輸出、Metadata 相容性、測試、使用說明、流程對照及架構圖。驗證須涵蓋五種模式的核心配置檢查、IPv4／IPv6 網域與 IP 字面值的實際代理請求、TCP 回退、非法模式、身份及匯出不變、失敗回復、停止狀態保留、舊 Metadata 及三協定既有回歸。實機 VPS、公網 IPv6、真實 systemd 與 arm64 的驗證限制須保留。
+
+替代方案是只提供三種自動／優先模式，省去另一地址族的拒絕控制；使用者已選擇五種，並明確確認按此方案實作及更新既有公開 GitHub 儲存庫；不部署使用者 VPS。
+
+查核來源：[sing-box v1.14.3 DNS 查詢及排序](https://github.com/SagerNet/sing-box/blob/v1.14.3/dns/client.go#L451-L513)、[IP 字面值的撥號流程](https://github.com/SagerNet/sing-box/blob/v1.14.3/common/dialer/resolve.go#L94-L131)、[resolver 物件的處理](https://github.com/SagerNet/sing-box/blob/v1.14.3/common/dialer/dialer.go#L104-L139)、[TCP Fast Fallback 與 UDP ListenSerial](https://github.com/SagerNet/sing/blob/0ad23b637bd49e7c2982640137df7598dde93ff9/common/network/multi.go#L34-L126)、[官方 Dial Fields](https://sing-box.sagernet.org/configuration/shared/dial/)、[拒絕動作](https://sing-box.sagernet.org/configuration/route/rule_action/#reject)。
+
+### 出口策略實作進度
+
+2026-10-14 已加入五種模式、共用配置產生器、自訂安裝／`EGRESS_MODE`、Metadata 舊版相容、`rep` 沿用策略、CLI／互動選單及狀態顯示。IPv6 來源地址交由 VPS 路由自動選用，不加入手動綁定或系統 IPv6 配置功能。
+
+切換先驗證候選配置，私密備份存於獨立的 `/var/lib/tri-proxy/egress-backups`，再替換 config／Metadata；核心啟動或中途替換失敗會嘗試回復，原本停止的服務不啟動。若 DNS／路由／出站配置與該模式的生成配置不一致，拒絕覆寫手動設定。
+
+新增 `work/test-egress.sh` 並整合主驗收，涵蓋 IPv4／IPv6 loopback 網域與字面 IP、mapped IPv4、三協定五模式、TCP 回退、切換前後身份及匯出、兩種交易故障、舊 Metadata、快捷／選單及備份權限。完整容器驗收已通過，結果如下。
+
+第一輪通過基本安裝及既有三協定連線，但測試網域的 `/etc/hosts` 沒有被核心 local resolver 讀取，回傳 NXDOMAIN。已改為 `work/egress-fixture.cjs` 提供真實本機 DNS 的 A／AAAA／空答案及雙棧 HTTP，非測試網域轉發原 DNS；切換後重啟測試核心，驗收結束恢復容器 DNS。此調整只作用於一次性容器，交付安裝器不修改系統 DNS。
+
+第二輪五種模式的三協定 HTTP 目標連線、網域／字面 IP、mapped IPv4 及 TCP 回退均通過。候選故障樣本原本使用無效 final 路由標籤，但核心 `check` 不會拒絕，僅在啟動時失敗；已觀察到配置及服務自動回復。檢查階段的拒絕測試改為無效出站類型，並保留獨立的啟動／中途替換故障測試。
+
+第三輪完整驗收於 2026-10-14 退出碼 `0`。通過全部五模式三協定連線、候選拒絕、手動 DNS／路由／出站拒絕覆寫、兩種交易故障回復、停止／開機狀態、舊 Metadata、快捷／互動選單、身份及匯出保留，以及全部出口備份權限與 SHA-256。亦通過環境變數／自訂安裝、`rep` 沿用及明確覆寫策略，以及原有 Mihomo、核心更新／回復、Argo、參數重建、解除安裝及重新安裝的全部回歸。
+
+驗證環境維持 Debian 12 amd64、sing-box 1.14.3、Mihomo 1.19.32、cloudflared 2026.10.0；重跑沿用上文完整容器命令。語法及 ShellCheck 已通過，新增 DNS／HTTP 測試程式亦通過 Node.js 語法檢查。測試容器已自動清理，沒有操作使用者 VPS、1Panel／OpenResty 或 Cloudflare 帳戶。
+
+本次已測版本的 SHA-256：
+
+- `outputs/tri-proxy-debian.sh`：`9a396b91c2cb95c95b0cde4a8ba060af6511021316426df80f465515f2f74ce3`。
+- `work/test-tri-proxy.sh`：`8df6eaec53084fce466a65a26d4a2bbbe95785f2ec9bd0fc53ab6f702b40f6db`。
+- `work/test-egress.sh`：`0c0e646fb29ec2a3b40a9f8a9df8d607ac07a22823d87f6dcf9a18ff783f6878`。
+- `work/egress-fixture.cjs`：`e57d9e3cec45b83b59610214075a2dfccaefe9ef44622777d1be6eeab0aae69e`。
+
+本輪腳本、操作文件、流程對照及架構圖已完成本地交付，沒有待決選項或本地驗收阻塞；使用者已授權更新既有公開 GitHub 儲存庫。驗證邊界仍為服務管理替身及 loopback IPv6，未驗證真實 systemd、公網 IPv6、VPS、防火牆、Cloudflare 帳戶或 arm64；UDP 目標的跨地址族回退不在本輪驗收範圍。

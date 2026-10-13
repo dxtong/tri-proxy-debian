@@ -11,7 +11,7 @@ sudo bash tri-proxy-debian.sh
 # 全自動，不需要輸入。
 sudo bash tri-proxy-debian.sh --defaults
 
-# 自訂入口地址、端口、憑證及 Argo。
+# 自訂入口地址、端口、憑證、Argo 及出口策略。
 sudo bash tri-proxy-debian.sh --custom
 
 # 自動辨識入口 IP 不適用時，明確指定公網 IP。
@@ -30,7 +30,7 @@ sudo env SERVER_ADDR=你的公網IP bash tri-proxy-debian.sh --defaults
 5) 更新核心
 6) 查看配置／節點
 7) 自訂安裝（含 Argo）
-8) 其他管理（日誌、檢查、回復、啟停、快捷命令）
+8) 其他管理（日誌、檢查、回復、啟停、快捷命令、出口策略）
 0) 離開
 ```
 
@@ -68,6 +68,7 @@ sudo env SERVER_ADDR=你的公網IP vlpt=24443 hypt=24443 vmpt=2080 argo=vmpt \
 | `ARGO_MODE=0/1/2` | `argo=vmpt` | 關閉／臨時／固定；配合下兩項時使用固定模式；舊別名 `argo=yes` 亦可 |
 | `ARGO_HOST` | `agn` | 固定公開網域 |
 | `CF_TUNNEL_TOKEN` | `agk` | 固定 Tunnel 的 Token 字串 |
+| `EGRESS_MODE` | 無 | 代理出口模式；首次預設 `auto` |
 
 描述式變數優先。亦可指定 `TLS_SNI`、`TLS_CERT`、`TLS_KEY`。UUID 須為標準格式，Hysteria2 密碼為 16–128 個字元；單獨指定密碼時 URI 會編碼特殊字元。啟用 Argo 時只提供固定網域或 Token 其中一項會被拒絕，避免誤用臨時 Tunnel；本版不支援 `argo=vwpt`。固定 Tunnel Token 優先在自訂模式隱藏輸入；放在環境變數或命令文字中可能留下 shell 歷史／行程環境記錄。
 
@@ -79,6 +80,41 @@ sudo env SERVER_ADDR=你的公網IP vlpt=24443 hypt=24443 vmpt=2080 argo=vmpt \
 | VMess WS + Argo | 自訂模式預設 127.0.0.1:2080/TCP | 客戶端連 Tunnel 網域的 443/TLS |
 
 1Panel 及供應商安全群組須放行上述直連端口。既有 80/443 的 Cloudflare IP 限制可以保留；REALITY／Hysteria2 的新端口須允許自己的客戶端來源 IP。Argo 模式的本機 WS 端口不用對外開放，cloudflared 需要出站 7844/TCP 或 UDP。預設入口只監聽 IPv4；入口地址指定 IPv6 時改用 `::`。
+
+## 代理出口 IPv4／IPv6
+
+此選項控制 VPS → 目標網站，三種協定共用；不更改客戶端 → VPS 的入口地址。首次及舊版 Metadata 缺少欄位時預設「自動」。
+
+| 選單 | 參數 | 行為 |
+|---|---|---|
+| 1 自動 | `auto` | 保留原本 direct 出站的地址族選擇 |
+| 2 IPv4 優先 | `prefer_ipv4` | 網域優先 IPv4；TCP 可回退 IPv6 |
+| 3 IPv6 優先 | `prefer_ipv6` | 網域優先 IPv6；TCP 可回退 IPv4 |
+| 4 僅 IPv4 | `ipv4_only` | 網域只取 IPv4，拒絕 IPv6 IP 目標 |
+| 5 僅 IPv6 | `ipv6_only` | 網域只取 IPv6，拒絕 IPv4 IP 目標（包括 mapped IPv4） |
+
+IPv6 地址毋須手動填入：VPS 須已配置可用 IPv6，來源地址由系統路由選用。腳本不替 VPS 配置 IPv6，亦不固定綁定某個地址。沒有可達的 IPv6 時，IPv6 優先的 TCP 可嘗試 IPv4；僅 IPv6 會失敗。僅 IPv6 亦無法連接只有 A 記錄的網站。
+
+```bash
+# 已安裝：顯示五種模式選單，Enter 保留目前模式。
+sudo agsbx egress
+
+# 直接切換；--egress 亦可。
+sudo agsbx egress prefer_ipv6
+sudo agsbx egress ipv6_only
+sudo agsbx egress auto
+
+# 首次非互動安裝。
+sudo env EGRESS_MODE=prefer_ipv6 bash tri-proxy-debian.sh --defaults
+```
+
+亦可在「其他管理 → 7 出口策略」或自訂安裝中選擇；`agsbx status` 顯示目前策略。舊安裝須先下載新版腳本並執行 `--install-command` 更新快捷管理腳本。
+
+切換先檢查模式、目前由腳本產生的配置及候選配置，再保存 root 專用備份與 SHA-256 到 `/var/lib/tri-proxy/egress-backups/<時間及隨機碼>/`，然後替換 config／Metadata。原本運行的核心會重啟；原本停止的核心及開機啟動設定維持原狀。UUID、密碼、端口、憑證及客戶端匯出不變，毋須重新匯入。切換及回復會中斷當前連線；替換或啟動失敗會嘗試回復原配置及運行狀態，失敗時列出備份路徑。
+
+DNS、路由或出站經手動修改，或與 Metadata 模式不一致時，切換會拒絕覆寫。備份含密碼／私鑰，目錄 `0700`、檔案 `0600`，不會自動刪除。`--rollback` 仍只回復核心，不回復出口策略。
+
+「優先」只影響送到 VPS 的網域；客戶端已解析的 IP 不會改寫。TCP 使用雙地址族 Fast Fallback，首選成功與否及時序都會影響結果；UDP 不保證在目標無回應時回退。DNS 使用系統 local resolver，DNS 查詢傳輸、REALITY 握手、cloudflared 及 VPS 其他程式不受此策略限制；它不等於全機禁用某地址族。
 
 ## Argo 選項
 
@@ -174,7 +210,7 @@ sudo env vmpt= agsbx rep
 
 `rep`／`--replace` 是明確的重建指令，不再要求互動確認。它會先下載並驗證核心、憑證及候選配置，然後保存完整私密快照及服務狀態到 `/var/lib/tri-proxy/replaced/<時間及隨機碼>/`，再停止舊服務及重建。空端口可重用原服務端口；若端口被其他行程佔用或新服務未能啟動，會嘗試回復原配置、核心、快捷命令、運行狀態及開機啟動設定。
 
-重建成功會啟動並啟用新服務。未指定身份時會重新生成 UUID、密碼、REALITY 金鑰及 TLS 憑證；客戶端必須重新匯入。要沿用指定身份，可提供 `uuid`，或分別提供 `UUID`、`VMESS_UUID`、`HY_PASSWORD`；憑證可透過 `TLS_CERT`／`TLS_KEY` 指定。其餘未指定選項採用安裝預設，固定 Tunnel 網域／Token 不會自動繼承。快照含秘密，須保密；若自動回復失敗，腳本會列出快照路徑。
+重建成功會啟動並啟用新服務。未指定身份時會重新生成 UUID、密碼、REALITY 金鑰及 TLS 憑證；客戶端必須重新匯入。要沿用指定身份，可提供 `uuid`，或分別提供 `UUID`、`VMESS_UUID`、`HY_PASSWORD`；憑證可透過 `TLS_CERT`／`TLS_KEY` 指定。未指定 `EGRESS_MODE` 時沿用原出口策略；其餘未指定選項採用安裝預設，固定 Tunnel 網域／Token 不會自動繼承。快照含秘密，須保密；若自動回復失敗，腳本會列出快照路徑。
 
 本版只提供三協定操作相容；不支援原版其他協定、Xray／`upx`、WARP、IPv4／IPv6 匯出切換或公開訂閱，也不會覆寫已有其他用途的 `agsbx` 快捷命令。已有舊版安裝時，先以新版原始腳本執行 `--install-command` 更新管理腳本。
 
@@ -218,6 +254,14 @@ sudo systemctl disable --now tri-proxy-argo
 安裝失敗時會嘗試停用自己的服務；已安裝的 Debian 套件、系統使用者及新建設定檔會保留供檢查。檔案中的連結、配置及日誌可能包含敏感資訊，不要公開貼出。代理協定不會提供 Claude 帳戶免封保證。
 
 ## 已執行的驗證
+
+2026-10-14 重新執行完整 Debian 12 amd64 容器驗收，退出碼 `0`，包含下列既有項目及新增出口驗證：
+
+- 五種模式的 sing-box 三協定實際 HTTP 目標連線：IPv4／IPv6 字面 IP、mapped IPv4、單地址族及雙棧 DNS、優先模式的 TCP 兩方向回退，以及僅模式拒絕另一地址族。
+- 出口 CLI／互動選單／自訂安裝／環境變數／非法值拒絕、舊 Metadata、`rep` 沿用及明確覆寫、私密備份權限及 SHA-256、身份／入口／憑證／客戶端匯出保留。
+- 手動 DNS／路由／出站拒絕覆寫、候選配置拒絕、啟動及中途替換失敗回復，停止／開機啟動狀態保留；全部既有核心更新、Mihomo、Argo、重建及解除安裝回歸通過。
+
+DNS 及目標 HTTP 使用本機測試服務；IPv6 為 `::1` loopback，不代表 VPS 公網 IPv6 可用。此輪主要驗證 TCP 目標，沒有驗證 UDP 目標的跨地址族回退。
 
 2026-10-13 在一次性 Debian 12 amd64 容器內完成以下驗證，完整測試退出碼為 `0`：
 

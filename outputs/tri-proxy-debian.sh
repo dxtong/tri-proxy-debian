@@ -7,6 +7,7 @@ CF_VERSION=2026.10.0
 BASE=/etc/tri-proxy
 BIN=/opt/tri-proxy
 BACKUPS=/var/lib/tri-proxy/backups
+EGRESS_BACKUPS=/var/lib/tri-proxy/egress-backups
 COMMAND=/usr/local/bin/tri-proxy
 COMPAT_COMMAND=/usr/local/bin/agsbx
 ACCOUNT=/var/lib/tri-proxy/account.id
@@ -42,6 +43,42 @@ ask() {
     local variable=$1 prompt=$2 fallback=$3 answer
     read -r -p "$prompt [$fallback]：" answer || die '輸入中斷；非互動安裝請用 --defaults。'
     printf -v "$variable" '%s' "${answer:-$fallback}"
+}
+
+valid_egress() {
+    case $1 in auto|prefer_ipv4|prefer_ipv6|ipv4_only|ipv6_only) return 0 ;; *) return 1 ;; esac
+}
+
+egress_label() {
+    case $1 in
+        auto) printf '自動' ;; prefer_ipv4) printf 'IPv4 優先' ;;
+        prefer_ipv6) printf 'IPv6 優先' ;; ipv4_only) printf '僅 IPv4' ;; ipv6_only) printf '僅 IPv6' ;;
+    esac
+}
+
+ask_egress() {
+    local choice fallback
+    case $EGRESS_MODE in auto) fallback=1 ;; prefer_ipv4) fallback=2 ;; prefer_ipv6) fallback=3 ;; ipv4_only) fallback=4 ;; ipv6_only) fallback=5 ;; esac
+    printf '代理出口：1) 自動  2) IPv4 優先  3) IPv6 優先  4) 僅 IPv4  5) 僅 IPv6\n'
+    printf 'IPv6 來源地址由 VPS 自動選用；VPS 須已配置可用 IPv6。\n'
+    ask choice '出口模式' "$fallback"
+    case $choice in
+        1) EGRESS_MODE=auto ;; 2) EGRESS_MODE=prefer_ipv4 ;; 3) EGRESS_MODE=prefer_ipv6 ;;
+        4) EGRESS_MODE=ipv4_only ;; 5) EGRESS_MODE=ipv6_only ;; *) die '出口模式須為 1–5。' ;;
+    esac
+}
+
+egress_config() {
+    valid_egress "$1" || die '出口模式無效；接受 auto、prefer_ipv4、prefer_ipv6、ipv4_only、ipv6_only。'
+    jq --arg mode "$1" '
+      .outbounds = [{type: "direct", tag: "direct"}] | .route = {final: "direct"} | del(.dns) |
+      if $mode == "auto" then . else
+        .dns = {servers: [{type: "local", tag: "tri-proxy-egress"}]} |
+        .outbounds[0].domain_resolver = {server: "tri-proxy-egress", strategy: $mode} |
+        if $mode == "ipv4_only" then .route.rules = [{ip_version: 6, action: "reject"}]
+        elif $mode == "ipv6_only" then .route.rules = [{ip_version: 4, action: "reject"}]
+        else . end
+      end'
 }
 
 download() {
@@ -112,7 +149,7 @@ make_server_config() {
           ],
           outbounds: [{type: "direct", tag: "direct"}],
           route: {final: "direct"}
-        }' > "$directory/config.json"
+        }' | egress_config "$EGRESS_MODE" > "$directory/config.json"
 }
 
 make_exports() {
@@ -274,11 +311,20 @@ load_metadata() {
         REALITY_SNI REALITY_PUBLIC REALITY_SID WS_PATH TLS_SNI ARGO_MODE ARGO_HOST; do
         printf -v "$variable" '%s' "$(jq -er --arg key "$variable" '.[$key]' "$BASE/metadata.json")"
     done
+    EGRESS_MODE=$(jq -er '.EGRESS_MODE // "auto"' "$BASE/metadata.json")
+    valid_egress "$EGRESS_MODE" || die 'Metadata 的出口模式無效。'
 }
 
 cleanup() {
     local status=$?
     trap - EXIT
+    if (( status != 0 && EGRESS_CHANGING == 1 )); then
+        if restore_egress; then
+            printf '出口切換失敗，已回復原配置及運行狀態；備份：%s\n' "$EGRESS_SNAPSHOT" >&2
+        else
+            printf '出口自動回復未成功；原配置保留在 %s，請查看服務日誌。\n' "$EGRESS_SNAPSHOT" >&2
+        fi
+    fi
     if (( status != 0 && REPLACING == 1 )); then
         if restore_replacement; then
             printf '重建失敗，已回復原配置、核心、快捷及服務狀態；備份：%s/install.tar.gz\n' "$INSTALL_SNAPSHOT" >&2
@@ -477,12 +523,12 @@ menu() {
             5) option=--update; read -r -p '正式版本 [latest]：' version || return ;;
             6) option=--show ;;
             8)
-                printf '1) 日誌\n2) 本機檢查\n3) 回復核心\n4) 啟動\n5) 停止\n6) 安裝／更新快捷命令\n0) 返回\n'
-                if ! read -r -p '請選擇 [0–6]：' choice; then return; fi
+                printf '1) 日誌\n2) 本機檢查\n3) 回復核心\n4) 啟動\n5) 停止\n6) 安裝／更新快捷命令\n7) 出口策略\n0) 返回\n'
+                if ! read -r -p '請選擇 [0–7]：' choice; then return; fi
                 case $choice in
                     0|'') continue ;; 1) option=--logs ;; 2) option=--check ;;
                     3) option=--rollback ;; 4) option=--start ;; 5) option=--stop ;;
-                    6) option=--install-command ;; *) printf '選項無效。\n'; continue ;;
+                    6) option=--install-command ;; 7) option=--egress ;; *) printf '選項無效。\n'; continue ;;
                 esac ;;
             *) printf '選項無效，請重新選擇。\n'; continue ;;
         esac
@@ -513,6 +559,50 @@ restart_if_running() {
         sleep 2
         systemctl is-active --quiet tri-proxy.service || return 1
     fi
+}
+
+replace_egress_files() {
+    install -m 640 -o root -g tri-proxy "$1/config.json" "$BASE/.config.new" || return 1
+    install -m 600 "$1/metadata.json" "$BASE/.metadata.new" || return 1
+    mv -f -- "$BASE/.config.new" "$BASE/config.json" || return 1
+    mv -f -- "$BASE/.metadata.new" "$BASE/metadata.json"
+}
+
+restore_egress() {
+    [[ $EGRESS_SNAPSHOT == "$EGRESS_BACKUPS/"* && $(realpath -e "$EGRESS_SNAPSHOT") == "$EGRESS_SNAPSHOT" ]] || return 1
+    (cd "$EGRESS_SNAPSHOT"; sha256sum --check --status SHA256SUMS) || return 1
+    replace_egress_files "$EGRESS_SNAPSHOT" || return 1
+    restart_if_running
+}
+
+manage_egress() {
+    require_install
+    load_metadata
+    local wanted=${1:-} expected
+    if [[ -z $wanted ]]; then ask_egress; wanted=$EGRESS_MODE; load_metadata; fi
+    valid_egress "$wanted" || die '出口模式無效；接受 auto、prefer_ipv4、prefer_ipv6、ipv4_only、ipv6_only。'
+    expected=$(printf '{}\n' | egress_config "$EGRESS_MODE")
+    jq -e --argjson expected "$expected" \
+        '[.outbounds, .route, .dns] == [$expected.outbounds, $expected.route, $expected.dns]' "$BASE/config.json" >/dev/null \
+        || die 'DNS／路由／出站配置已自訂或與 Metadata 不一致；拒絕覆寫，請先檢查。'
+    if [[ $wanted == "$EGRESS_MODE" ]]; then printf '出口已是 %s，沒有更改。\n' "$(egress_label "$wanted")"; return; fi
+    WORK=$(mktemp -d /tmp/tri-proxy.XXXXXXXX)
+    trap cleanup EXIT
+    egress_config "$wanted" < "$BASE/config.json" > "$WORK/config.json"
+    jq --arg mode "$wanted" '.EGRESS_MODE = $mode' "$BASE/metadata.json" > "$WORK/metadata.json"
+    "$BIN/sing-box" check -c "$WORK/config.json" || die '候選出口配置不相容；原設定保留。'
+    install -d -m 700 "$EGRESS_BACKUPS"
+    EGRESS_SNAPSHOT=$(mktemp -d "$EGRESS_BACKUPS/$(date -u +%Y%m%dT%H%M%SZ)-XXXXXXXX")
+    install -m 600 "$BASE/config.json" "$BASE/metadata.json" "$EGRESS_SNAPSHOT/"
+    remember_running
+    printf '%s\n' "$WAS_RUNNING" > "$EGRESS_SNAPSHOT/was-running"
+    (cd "$EGRESS_SNAPSHOT"; sha256sum config.json metadata.json was-running > SHA256SUMS; sha256sum --check --status SHA256SUMS)
+    EGRESS_CHANGING=1
+    replace_egress_files "$WORK" || die '未能替換出口設定。'
+    restart_if_running || die '出口切換後核心未能正常啟動。'
+    EGRESS_CHANGING=0
+    printf '代理出口：%s → %s；備份：%s\n' "$(egress_label "$EGRESS_MODE")" "$(egress_label "$wanted")" "$EGRESS_SNAPSHOT"
+    printf 'IPv6 來源地址由 VPS 自動選用；身份、入口及客戶端匯出保留。\n'
 }
 
 manage_update() {
@@ -583,13 +673,16 @@ manage() {
     case $1 in
         --status)
             "$BIN/sing-box" version | head -n1
+            load_metadata
+            printf '代理出口：%s（%s）\n' "$(egress_label "$EGRESS_MODE")" "$EGRESS_MODE"
             systemctl show tri-proxy.service -p ActiveState -p SubState -p UnitFileState
             if [[ -x $BIN/cloudflared ]]; then
                 "$BIN/cloudflared" --version
                 systemctl show tri-proxy-argo.service -p ActiveState -p SubState -p UnitFileState
             fi
             printf '\n命令：agsbx list（節點）／res（重啟）／ups（更新）／del（備份解除安裝）。\n'
-            printf '參數重建：sudo env vlpt= hypt= vmpt= agsbx rep；選單：sudo tri-proxy。\n' ;;
+            printf '參數重建：sudo env vlpt= hypt= vmpt= agsbx rep；選單：sudo tri-proxy。\n'
+            printf '切換出口：sudo agsbx egress（互動）／egress <模式>。\n' ;;
         --logs) journalctl -u tri-proxy.service -u tri-proxy-argo.service -n 60 --no-pager ;;
         --check)
             "$BIN/sing-box" check -c "$BASE/config.json"
@@ -626,6 +719,7 @@ main() (
     COMMITTED=0
     UPDATING=0
     REPLACING=0
+    EGRESS_CHANGING=0
     WORK=
     if [[ $# == 0 && ${0##*/} == agsbx && -f $BASE/metadata.json ]]; then option=--status; fi
     case $option in
@@ -634,16 +728,18 @@ main() (
         update|ups) option=--update ;; config|list) option=--show ;;
         start) option=--start ;; stop) option=--stop ;;
         rep) option=--replace ;;
+        egress) option=--egress ;;
     esac
-    [[ $# -le 1 || ( $option == --update && $# == 2 ) ]] || die '參數過多；請用 --help。'
+    [[ $# -le 1 || ( ( $option == --update || $option == --egress ) && $# == 2 ) ]] || die '參數過多；請用 --help。'
     case $option in
         --help|-h)
             printf '用法：bash %s [--defaults|--custom|--replace|--show|--status|--logs|--check|--start|--stop|--restart|--update [版本]|--rollback|--uninstall|--install-command]\n' "$0"
             printf '不帶選項：選單，按 Enter 使用預設。--defaults：非互動；可用 SERVER_ADDR 指定入口 IP。\n'
             printf '亦接受：install、rep、uninstall/del、restart/res、status、update/ups、config/list、start、stop。\n'
             printf 'rep 至少設定一項端口變數（空值沿用）；argo=vmpt 啟用 VMess Tunnel，搭配 agn/agk 使用固定網域。\n'
+            printf '出口：egress / --egress [auto|prefer_ipv4|prefer_ipv6|ipv4_only|ipv6_only]；安裝可用 EGRESS_MODE，預設 auto。\n'
             return ;;
-        menu|--defaults|--custom|--replace|--show|--status|--logs|--check|--start|--stop|--restart|--update|--rollback|--uninstall|--install-command) ;;
+        menu|--defaults|--custom|--replace|--show|--status|--logs|--check|--start|--stop|--restart|--update|--rollback|--uninstall|--install-command|--egress) ;;
         *) die '未知選項；請用 --help。' ;;
     esac
     [[ $EUID == 0 ]] || die '請用 sudo bash 執行。'
@@ -658,6 +754,7 @@ main() (
         --rollback) manage_rollback; return ;;
         --uninstall) manage_uninstall; return ;;
         --install-command) setup_manager; return ;;
+        --egress) manage_egress "${2:-}"; return ;;
         --status|--logs|--check|--start|--stop|--restart) manage "$option"; return ;;
     esac
     [[ -r /etc/os-release ]] || die '無法識別作業系統。'
@@ -668,6 +765,7 @@ main() (
     check_shortcuts
     if [[ $option == --replace ]]; then
         require_install
+        if [[ ! ${EGRESS_MODE+x} ]]; then EGRESS_MODE=$(jq -er '.EGRESS_MODE // "auto"' "$BASE/metadata.json"); fi
         account_owned || die '無法確認本腳本的專用帳戶，拒絕重建。'
         [[ -n ${vlpt+x}${hypt+x}${vmpt+x}${REALITY_PORT+x}${HY_PORT+x}${WS_PORT+x} ]] \
             || die 'rep 至少要設定 vlpt、hypt 或 vmpt（亦接受描述式端口變數）；空值沿用原端口。'
@@ -679,6 +777,8 @@ main() (
             if systemctl cat "$pair" >/dev/null 2>&1; then die "$pair 已存在；本腳本不覆寫。"; fi
         done
     fi
+    EGRESS_MODE=${EGRESS_MODE-auto}
+    valid_egress "$EGRESS_MODE" || die 'EGRESS_MODE 無效；接受 auto、prefer_ipv4、prefer_ipv6、ipv4_only、ipv6_only。'
     if ! account_owned; then
         ! getent passwd tri-proxy >/dev/null || die 'tri-proxy 使用者已存在，請先檢查既有安裝。'
         ! getent group tri-proxy >/dev/null || die 'tri-proxy 群組已存在，請先檢查既有安裝。'
@@ -748,6 +848,7 @@ main() (
             CF_TUNNEL_TOKEN=${pair:-$CF_TUNNEL_TOKEN}
             printf '\n'
         fi
+        ask_egress
     fi
     valid_host "$SERVER_ADDR" || die '入口地址無效；可使用 SERVER_ADDR=你的公網IP bash 腳本 --defaults。'
     valid_host "$REALITY_SNI" && [[ $REALITY_SNI != *:* ]] || die 'REALITY 握手網域無效。'
@@ -821,6 +922,7 @@ main() (
         --arg REALITY_SNI "$REALITY_SNI" --arg REALITY_PUBLIC "$REALITY_PUBLIC" \
         --arg REALITY_SID "$REALITY_SID" --arg WS_PATH "$WS_PATH" \
         --arg TLS_SNI "$TLS_SNI" --arg ARGO_MODE "$ARGO_MODE" --arg ARGO_HOST "$ARGO_HOST" \
+        --arg EGRESS_MODE "$EGRESS_MODE" \
         '$ARGS.named' > "$WORK/metadata.json"
     if [[ $option == --replace ]]; then begin_replacement; fi
     port_free tcp "$REALITY_PORT"
@@ -910,6 +1012,7 @@ UNIT
     setup_manager
     COMMITTED=0
     printf '\n本機服務已啟動；公網可達性仍需從另一部電腦驗證。\n'
+    printf '代理出口：%s（%s）；IPv6 來源地址由 VPS 自動選用。\n' "$(egress_label "$EGRESS_MODE")" "$EGRESS_MODE"
     printf '1Panel／供應商防火牆：允許 %s/TCP（REALITY）、%s/UDP（Hysteria2）。\n' "$REALITY_PORT" "$HY_PORT"
     if [[ $ARGO_MODE == 0 ]]; then
         printf '另允許 %s/TCP（VMess WS TLS）。\n' "$WS_PORT"

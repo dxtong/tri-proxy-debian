@@ -18,9 +18,15 @@ flowchart LR
   Mihomo客戶端 -->|可選 WSS| Cloudflare
   Cloudflare --> cloudflared
   cloudflared -->|127.0.0.1 的 HTTP WS| singbox
-  singbox --> 目標服務
+  管理腳本 -->|egress 候選檢查及失敗回復| 出口配置[五種出口地址族策略]
+  管理腳本 -->|config／Metadata 及 SHA-256| 出口備份[私密出口備份]
+  出口備份 -->|切換失敗回復| 出口配置
+  singbox --> 出口配置
+  出口配置 -->|系統自動選用來源地址| 目標服務
 ```
 
 直連端口由 1Panel／供應商防火牆決定可達範圍。Argo 不覆蓋 REALITY 或 Hysteria2 的直連入口。
 
 `agsbx` 無參數顯示狀態及命令，`tri-proxy` 保留循環選單。`rep` 是三協定參數重建，成功後客戶端須重新匯入；空端口沿用原端口。
+
+`egress` 切換保留入口、身份、憑證及客戶端匯出；`rep` 未指定 `EGRESS_MODE` 時沿用原策略。出口 IPv6 毋須填入，VPS 須已配置可用 IPv6；策略不涵蓋 REALITY 握手、cloudflared、DNS 傳輸或 VPS 其他程式。
