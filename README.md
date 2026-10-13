@@ -2,7 +2,15 @@
 
 單個 sing-box 核心提供 VLESS REALITY、Hysteria2 及 VMess WS，支援選用 Cloudflare Tunnel。預設 Argo 關閉，客戶端匯出優先使用 Clash／Mihomo。
 
-目標環境為 Debian 11+、amd64／arm64 及 systemd。下載儲存庫後，在 VPS 的儲存庫目錄執行：
+目標環境為 Debian 11+、amd64／arm64 及 systemd。本儲存庫為公開，可在自己的 VPS 免登入下載並執行：
+
+```bash
+curl -fL https://raw.githubusercontent.com/dxtong/tri-proxy-debian/main/outputs/tri-proxy-debian.sh -o tri-proxy-debian.sh && sudo bash tri-proxy-debian.sh
+```
+
+首次按 Enter 使用預設安裝；自訂安裝可執行 `sudo bash tri-proxy-debian.sh --custom`。
+
+若下載了整個儲存庫，在 VPS 的儲存庫目錄執行：
 
 ```bash
 # 首次按 Enter 使用預設安裝。
@@ -11,8 +19,6 @@ sudo bash outputs/tri-proxy-debian.sh
 # 自訂端口、憑證及 Argo。
 sudo bash outputs/tri-proxy-debian.sh --custom
 ```
-
-若只下載 `tri-proxy-debian.sh`，在其所在目錄執行 `sudo bash tri-proxy-debian.sh`。私人 GitHub 儲存庫須先登入下載；執行本機腳本毋須 GitHub 登入。請勿把 GitHub Token 寫入安裝命令。
 
 安裝後以 `sudo agsbx` 查看狀態及命令提示，或以 `sudo tri-proxy` 開啟循環管理選單。提供端口避讓、狀態／日誌、啟停、重啟、有備份的核心更新／回復、參數重建及備份解除安裝。
 
