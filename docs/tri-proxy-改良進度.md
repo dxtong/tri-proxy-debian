@@ -80,7 +80,7 @@ docker.exe run --rm --name tri-proxy-verify --mount 'type=bind,source=C:/Users/D
 
 驗證邊界仍為 Debian 12 amd64 容器，服務管理使用替身、代理核心為真實非 root 行程。未驗證真實 systemd 管理器、VPS、公網防火牆／安全群組、Cloudflare 帳戶或 arm64；完整 argosbx 功能及所有參數不在本次交付範圍。
 
-## GitHub 發佈準備
+## GitHub 發佈
 
 2026-10-14 使用者要求推送至 GitHub。已補上儲存庫首頁、Shell 腳本 LF 行尾規則，以及伺服器私密設定／客戶端匯出的 Git 忽略規則；已核對兩個腳本的 SHA-256 與上述完整驗證版本一致。發佈包保留原有腳本、測試及文件，沒有改動代理邏輯。
 
@@ -88,4 +88,8 @@ docker.exe run --rm --name tri-proxy-verify --mount 'type=bind,source=C:/Users/D
 
 已檢查提交內的腳本與本機已測版本一致、README 本機連結有效、Git 忽略規則生效及候選檔案沒有常見的 Token／私鑰標記。發佈準備階段沒有重新執行完整容器測試。
 
-Git Credential Manager 的裝置登入已啟動，等待使用者登入及授權；未將登入碼或憑證寫入本儲存庫。尚未建立遠端或推送；登入成功後查證帳戶、新建指定的公開儲存庫、補上直接下載命令並推送。最後須核對遠端 `main` 的 Commit 及下載腳本 SHA-256。不將參考的第三方儲存庫視為發佈目標。
+已查證登入帳戶 `dxtong`，建立[公開儲存庫](https://github.com/dxtong/tri-proxy-debian)並推送 `main`；README 已加入免登入下載及安裝命令。Git 登入憑證由 Git Credential Manager 保管，未寫入本儲存庫。
+
+發佈核對已通過：遠端 `main` 與本地提交一致、全部 10 個檔案的清單一致；兩個 Shell 腳本均可匿名下載（HTTP `200`），SHA-256 與上述完整驗證版本一致。首次核對的提交為 `fb6829abb173f5cb18b79c92728570d75a956cfd`；本段發佈記錄亦提交及推送至同一分支。
+
+本輪完成 GitHub 發佈及下載核對；未部署 VPS、未重新執行完整容器測試，原有真實 systemd、Cloudflare 帳戶、公網防火牆及 arm64 的驗證邊界維持不變。
